@@ -35,14 +35,14 @@ object SpinalVhdl {
           tryCounter match {
             case 0 => {
               println("\n**********************************************************************************************")
-              SpinalWarning("Elaboration fail !!! Spinal restart it with scala trace to help you to find the problem")
+              SpinalWarning("Elaboration fails !!! Spinal will now restart with Scala trace to expose the problem")
               println("**********************************************************************************************\n")
               Thread.sleep(10);
               return doIt(1)
             }
             case 1 => {
               println("\n**********************************************************************************************")
-              SpinalWarning("Elaboration fail !!!")
+              SpinalWarning("Elaboration fails !!!")
               println("**********************************************************************************************")
               Thread.sleep(10);
               throw e
