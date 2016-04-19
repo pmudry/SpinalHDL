@@ -19,29 +19,29 @@ object CoreMain{
       cpuDataWidth = 32,
       memDataWidth = 32)
 
-    implicit val p = CoreParm(
+    implicit val p = CoreConfig(
       pcWidth = 32,
       addrWidth = 32,
       startAddress = 0x200,
       regFileReadyKind = sync,
-      branchPrediction = dynamic,
-      bypassExecute0 = true,
-      bypassExecute1 = true,
-      bypassWriteBack0 = true,
-      bypassWriteBack1 = true,
+      branchPrediction = disable,
+      bypassExecute0 = false,
+      bypassExecute1 = false,
+      bypassWriteBack0 = false,
+      bypassWriteBack1 = false,
       collapseBubble = true,
       instructionBusKind = cmdStream_rspFlow_oneCycle,
       dataBusKind = cmdStream_rspFlow,
-      fastFetchCmdPcCalculation = true,
+      fastFetchCmdPcCalculation = false,
       dynamicBranchPredictorCacheSizeLog2 = 7
     )
 
     if(cached) assert(p.instructionBusKind == cmdStream_rspFlow_oneCycle)
-    p.add(new MulExtension)
-    p.add(new DivExtension)
-    p.add(new BarrelShifterFullExtension)
-    p.add(new SimpleInterruptExtension(exceptionVector=0x0).addIrq(id=4,pin=io_interrupt,IrqUsage(isException=false),name="io_interrupt"))
-    //      p.add(new BarrelShifterLightExtension)
+   // p.add(new MulExtension)
+  //  p.add(new DivExtension)
+    //p.add(new BarrelShifterFullExtension)
+    //p.add(new SimpleInterruptExtension(exceptionVector=0x0).addIrq(id=4,pin=io_interrupt,IrqUsage(isException=false),name="io_interrupt"))
+    p.add(new BarrelShifterLightExtension)
     val io = new Bundle{
       val i = master(CoreInstructionBus())
       val d = master(CoreDataBus())
@@ -129,6 +129,7 @@ object QSysAvalonCore{
 
   class RiscvAvalon extends Component{
     val cached = true
+    val debug = true
     val cacheParam = InstructionCacheParameters(  cacheSize =4096,
       bytePerLine =32,
       wayCount = 1,
@@ -137,20 +138,20 @@ object QSysAvalonCore{
       cpuDataWidth = 32,
       memDataWidth = 32)
 
-    lazy val p = CoreParm(
+    lazy val p = CoreConfig(
       pcWidth = 32,
       addrWidth = 32,
       startAddress = 0x200,
       regFileReadyKind = sync,
-      branchPrediction = dynamic,
-      bypassExecute0 = true,
-      bypassExecute1 = true,
-      bypassWriteBack0 = true,
-      bypassWriteBack1 = true,
+      branchPrediction = disable,
+      bypassExecute0 = false,
+      bypassExecute1 = false,
+      bypassWriteBack0 = false,
+      bypassWriteBack1 = false,
       collapseBubble = true,
       instructionBusKind = cmdStream_rspFlow_oneCycle,
       dataBusKind = cmdStream_rspFlow,
-      fastFetchCmdPcCalculation = true,
+      fastFetchCmdPcCalculation = false,
       dynamicBranchPredictorCacheSizeLog2 = 7
     )
 
@@ -166,12 +167,25 @@ object QSysAvalonCore{
       val interrupt = in(Bool)
     }
 
-    p.add(new MulExtension)
-    p.add(new DivExtension)
-    p.add(new BarrelShifterFullExtension)
-    p.add(new SimpleInterruptExtension(exceptionVector=0x0).addIrq(id=4,pin=io.interrupt,IrqUsage(isException=false),name="io_interrupt"))
-    //      p.add(new BarrelShifterLightExtension)
+   // p.add(new MulExtension)
+   // p.add(new DivExtension)
+   // p.add(new BarrelShifterFullExtension)
+   // p.add(new SimpleInterruptExtension(exceptionVector=0x0).addIrq(id=4,pin=io.interrupt,IrqUsage(isException=false),name="io_interrupt"))
+    p.add(new BarrelShifterLightExtension)
+
+    val debugExtension = if(debug) {
+      val extension = new DebugExtension()
+      p.add(extension)
+      extension
+    } else null
+
     val core = new Core()(p)
+
+    val io_debugBus = if(debug) {
+      val avalon = slave(AvalonMMBus(DebugExtension.getAvalonMMConfig))
+      DebugExtension.avalonToDebugBus(avalon,debugExtension.io.bus)
+      avalon
+    }else null
 
     val cache = new InstructionCache()(cacheParam)
     if(cached){
@@ -200,6 +214,7 @@ object QSysAvalonCore{
     report.topLevel.io.i addTag(ClockDomainTag(report.topLevel.clockDomain))
     report.topLevel.io.d addTag(ClockDomainTag(report.topLevel.clockDomain))
     report.topLevel.io.interrupt addTag(InterruptReceiverTag(report.topLevel.io.i,report.topLevel.clockDomain))
+    if(report.topLevel.debug) report.topLevel.io_debugBus addTag(ClockDomainTag(report.topLevel.clockDomain))
     QSysify(report.topLevel)
   }
 }

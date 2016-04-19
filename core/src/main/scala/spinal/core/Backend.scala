@@ -17,21 +17,22 @@
  */
 
 package spinal.core
+
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
-
 
 class BackendReport[T <: Component](val topLevel: T) {
 
 }
 
 trait Phase{
-  def run
+  def run()
 }
 
 class MultiPhase extends Phase{
   val phases = ArrayBuffer[Phase]()
-  override def run: Unit = {
+
+  override def run(): Unit = {
     phases.foreach(_.run)
   }
 }
@@ -46,39 +47,36 @@ class Backend {
   val enums = mutable.Map[SpinalEnum,mutable.Set[SpinalEnumEncoding]]()
   var forceMemToBlackboxTranslation = false
   var jsonReportPath = ""
-  var defaultClockDomainFrequancy : IClockDomainFrequency = UnknownFrequency()
+  var defaultClockDomainFrequency : IClockDomainFrequency = UnknownFrequency()
 
   def addReservedKeyWordToScope(scope: Scope): Unit = {
     reservedKeyWords.foreach(scope.allocateName(_))
   }
 
-
   def elaborate[T <: Component](gen: () => T): BackendReport[T] = {
     SpinalInfoPhase("Start elaboration")
 
     //default clockDomain
-    val defaultClockDomain = ClockDomain("",defaultClockDomainFrequancy)
+    val defaultClockDomain = ClockDomain.external("",frequency = defaultClockDomainFrequency)
 
     ClockDomain.push(defaultClockDomain)
     topLevel = gen()
 //    if(topLevel.isUnnamed)topLevel.setWeakName("toplevel")
     ClockDomain.pop(defaultClockDomain)
 
-
-    def checkGlobalData: Unit = {
+    def checkGlobalData() : Unit = {
       if (!GlobalData.get.clockDomainStack.isEmpty) SpinalWarning("clockDomain stack is not empty :(")
       if (!GlobalData.get.componentStack.isEmpty) SpinalWarning("componentStack stack is not empty :(")
       if (!GlobalData.get.switchStack.isEmpty) SpinalWarning("switchStack stack is not empty :(")
       if (!GlobalData.get.conditionalAssignStack.isEmpty) SpinalWarning("conditionalAssignStack stack is not empty :(")
     }
+
     checkGlobalData
     val ret = elaborate(topLevel.asInstanceOf[T])
     checkGlobalData
 
-
     globalData.postBackendTask.foreach(_())
     val reports = globalData.jsonReports
-
 
     val builder = new mutable.StringBuilder
     builder ++= "{\n"
@@ -91,9 +89,8 @@ class Backend {
     builder ++= "}\n"
     val out = new java.io.FileWriter(jsonReportPath + ".json")
     out.write(builder.toString())
-    out.flush();
-    out.close();
-
+    out.flush()
+    out.close()
 
     ret
   }
@@ -108,11 +105,12 @@ class Backend {
     SpinalInfoPhase("Start analysis and transform")
     addReservedKeyWordToScope(globalScope)
 
+    buildComponentsList(topLevel)
     applyComponentIoDefaults()
     walkNodesBlackBoxGenerics()
-    remplaceMemByBlackBox_simplifyWriteReadWithSameAddress()
+    replaceMemByBlackBox_simplifyWriteReadWithSameAddress()
 
-    addComponent(topLevel)
+
     sortedComponents = components.sortWith(_.level > _.level)
 
     //trickDontCares()
@@ -124,7 +122,7 @@ class Backend {
     collectAndNameEnum()
 
     //Component connection
-    SpinalInfoPhase("Transform connection")
+    SpinalInfoPhase("Transform connections")
     // allowLiteralToCrossHierarchy
     pullClockDomains()
     check_noNull_noCrossHierarchy_noInputRegister_noDirectionLessIo()
@@ -138,13 +136,13 @@ class Backend {
     SpinalInfoPhase("Infer nodes's bit width")
     inferWidth()
     simplifyNodes()
+    inferWidth()
     propagateBaseTypeWidth()
     normalizeNodeInputs()
-    checkInferedWidth()
-
+    checkInferredWidth()
 
     //Check
-    SpinalInfoPhase("Check combinational loops")
+    SpinalInfoPhase("Check combinatorial loops")
     checkCombinationalLoops2()
     SpinalInfoPhase("Check cross clock domains")
     checkCrossClockDomains()
@@ -156,10 +154,9 @@ class Backend {
     dontSymplifyBasetypeWithComplexAssignement()
     deleteUselessBaseTypes()
    // convertWhenToDefault()
-    SpinalInfoPhase("Check that there is no incomplet assignement")
-    check_noAsyncNodeWithIncompletAssignment()
+    SpinalInfoPhase("Check that there is no incomplete assignment")
+    check_noAsyncNodeWithIncompleteAssignment()
     simplifyBlacBoxGenerics()
-
 
     SpinalInfoPhase("Finalise")
 
@@ -173,12 +170,9 @@ class Backend {
     allocateNames()
     removeComponentThatNeedNoHdlEmit()
 
-
     printStates()
 
-
     new BackendReport(topLevel)
-
   }
 
   def nameNodesByReflection(): Unit = {
@@ -196,8 +190,7 @@ class Backend {
     }
   }
 
-
-  def remplaceMemByBlackBox_simplifyWriteReadWithSameAddress(): Unit = {
+  def replaceMemByBlackBox_simplifyWriteReadWithSameAddress(): Unit = {
     class MemTopo(val mem: Mem[_]) {
       val writes = ArrayBuffer[MemWrite]()
       val readsAsync = ArrayBuffer[MemReadAsync]()
@@ -212,7 +205,7 @@ class Backend {
     Node.walk(walkNodesDefautStack,node => node match {
       case write: MemWrite => {
         val memTopo = topoOf(write.getMem)
-        val readSync = memTopo.readsSync.find(readSync => readSync.originalAddress == write.originalAddress).getOrElse(null)
+        val readSync = memTopo.readsSync.find(readSync => readSync.originalAddress == write.originalAddress).orNull
         if (readSync == null) {
           memTopo.writes += write
         } else {
@@ -224,7 +217,7 @@ class Backend {
       case readAsync: MemReadAsync => topoOf(readAsync.getMem).readsAsync += readAsync
       case readSync: MemReadSync => {
         val memTopo = topoOf(readSync.getMem)
-        val write = memTopo.writes.find(write => readSync.originalAddress == write.originalAddress).getOrElse(null)
+        val write = memTopo.writes.find(write => readSync.originalAddress == write.originalAddress).orNull
         if (write == null) {
           memTopo.readsSync += readSync
         } else {
@@ -253,11 +246,11 @@ class Backend {
     for ((mem, topo) <- memsTopo.iterator if forceMemToBlackboxTranslation || mem.forceMemToBlackboxTranslation
                                           if mem.initialContent == null) {
 
-      if (topo.writes.size == 1 && topo.readsAsync.size == 1 && topo.readsSync.size == 0 && topo.writeReadSync.size == 0 && topo.writeOrReadSync.size == 0) {
+      if (topo.writes.size == 1 && topo.readsAsync.size == 1 && topo.readsSync.isEmpty && topo.writeReadSync.isEmpty && topo.writeOrReadSync.isEmpty) {
         val wr = topo.writes(0)
         val rd = topo.readsAsync(0)
         val clockDomain = wr.getClockDomain
-        clockDomain.push
+        clockDomain.push()
         Component.push(mem.component)
 
         val ram = Component(new Ram_1c_1w_1ra(mem.getWidth, mem.wordCount, rd.writeToReadKind))
@@ -272,14 +265,14 @@ class Backend {
 
         ram.setCompositeName(mem)
         Component.pop(mem.component)
-        clockDomain.pop
-      } else if (topo.writes.size == 1 && topo.readsAsync.size == 0 && topo.readsSync.size == 1 && topo.writeReadSync.size == 0 && topo.writeOrReadSync.size == 0) {
+        clockDomain.pop()
+      } else if (topo.writes.size == 1 && topo.readsAsync.isEmpty && topo.readsSync.size == 1 && topo.writeReadSync.isEmpty && topo.writeOrReadSync.isEmpty) {
         val wr = topo.writes(0)
         val rd = topo.readsSync(0)
         if (rd.getClockDomain.clock == wr.getClockDomain.clock) {
           val clockDomain = wr.getClockDomain
 
-          clockDomain.push
+          clockDomain.push()
           Component.push(mem.component)
 
           val ram = Component(new Ram_1c_1w_1rs(mem.getWidth, mem.wordCount, rd.writeToReadKind))
@@ -300,15 +293,15 @@ class Backend {
 
           ram.setCompositeName(mem)
           Component.pop(mem.component)
-          clockDomain.pop
+          clockDomain.pop()
         }
-      } else if (topo.writes.size == 0 && topo.readsAsync.size == 0 && topo.readsSync.size == 0 && topo.writeReadSync.size == 1 && topo.writeOrReadSync.size == 0) {
+      } else if (topo.writes.isEmpty && topo.readsAsync.isEmpty && topo.readsSync.isEmpty && topo.writeReadSync.size == 1 && topo.writeOrReadSync.isEmpty) {
         val wr = topo.writeReadSync(0)._1
         val rd = topo.writeReadSync(0)._2
         if (rd.getClockDomain.clock == wr.getClockDomain.clock) {
           val clockDomain = wr.getClockDomain
 
-          clockDomain.push
+          clockDomain.push()
           Component.push(mem.component)
 
           val ram = Component(new Ram_1wrs(mem.getWidth, mem.wordCount, rd.writeToReadKind))
@@ -328,15 +321,15 @@ class Backend {
 
           ram.setCompositeName(mem)
           Component.pop(mem.component)
-          clockDomain.pop
+          clockDomain.pop()
         }
-      } else if (topo.writes.size == 0 && topo.readsAsync.size == 0 && topo.readsSync.size == 0 && topo.writeReadSync.size == 0 && topo.writeOrReadSync.size == 1) {
+      } else if (topo.writes.isEmpty && topo.readsAsync.isEmpty && topo.readsSync.isEmpty && topo.writeReadSync.isEmpty && topo.writeOrReadSync.size == 1) {
         val wr = topo.writeOrReadSync(0)._1
         val rd = topo.writeOrReadSync(0)._2
         if (rd.getClockDomain.clock == wr.getClockDomain.clock) {
           val clockDomain = wr.getClockDomain
 
-          clockDomain.push
+          clockDomain.push()
           Component.push(mem.component)
 
           val ram = Component(new Ram_1wors(mem.getWidth, mem.wordCount, rd.writeToReadKind))
@@ -351,10 +344,12 @@ class Backend {
 
           ram.setCompositeName(mem)
           Component.pop(mem.component)
-          clockDomain.pop
+          clockDomain.pop()
         }
       }
     }
+    components.clear()
+    buildComponentsList(topLevel)
   }
 
   def printStates(): Unit = {
@@ -438,9 +433,8 @@ class Backend {
 //      case _ =>
 //    })
   }
-  def check_noAsyncNodeWithIncompletAssignment(): Unit = {
 
-
+  def check_noAsyncNodeWithIncompleteAssignment(): Unit = {
     val errors = mutable.ArrayBuffer[String]()
 
     Node.walk(walkNodesDefautStack,node => node match {
@@ -471,18 +465,17 @@ class Backend {
         unassignedBits.add(signalRange)
         unassignedBits.remove(assignedBits)
         if (!unassignedBits.isEmpty)
-          errors += s"Incomplet assignment is detected on $signal, unassigned bit mask is ${unassignedBits.toBinaryString}, declared at ${signal.getScalaLocationString}"
-
-
+          errors += s"Incomplete assignment is detected on $signal, unassigned bit mask " +
+                    s"is ${unassignedBits.toBinaryString}, declared at ${signal.getScalaLocationString}"
       }
       case _ =>
     })
 
-    if (!errors.isEmpty)
+    if (errors.nonEmpty)
       SpinalError(errors)
   }
 
-  //clone is to week, lose tag and don't symplify :(
+  // Clone is to weak, loses tag and don't symplify :(
   def allowLiteralToCrossHierarchy(): Unit = {
     Node.walk(walkNodesDefautStack,consumer => {
       for (consumerInputId <- 0 until consumer.inputs.size) {
@@ -509,7 +502,6 @@ class Backend {
   def check_noNull_noCrossHierarchy_noInputRegister_noDirectionLessIo(): Unit = {
     val errors = mutable.ArrayBuffer[String]()
 
-
     for(c <- components){
       try{
         val io = c.reflectIo
@@ -524,9 +516,7 @@ class Backend {
 
     }
 
-
     Node.walk(walkNodesDefautStack,node => {
-
       node match {
         case node: BaseType => {
           val in = node.inputs(0)
@@ -564,7 +554,7 @@ class Backend {
               errors += s"No driver on ${node.getScalaLocationString}"
             } else {
               if (in.component != node.component && !(in.isInstanceOf[BaseType] && in.asInstanceOf[BaseType].isIo && node.component == in.component.parent))
-                errors += s"Node is drived outside his component ${node.getScalaLocationString}"
+                errors += s"Node is driven outside his component ${node.getScalaLocationString}"
             }
           }
         }
@@ -593,8 +583,6 @@ class Backend {
 
 
   }
-
-
 
   def normalizeNodeInputs(): Unit = {
     Node.walk(walkNodesDefautStack,(node,push) => {
@@ -642,17 +630,19 @@ class Backend {
     })
   }
 
-
-
   def pullClockDomains(): Unit = {
     Node.walk(walkNodesDefautStack,(node, push) =>  {
       node match {
         case delay: SyncNode => {
-          if(delay.isUsingReset && !delay.getClockDomain.hasReset) SpinalError(s"Clockdomain without reset contain a register which need one\n ${delay.getScalaLocationString}")
+          if(delay.isUsingReset && !delay.getClockDomain.hasReset)
+              SpinalError(s"Clock domain without reset contain a register which needs one\n ${delay.getScalaLocationString}")
+
           Component.push(delay.component)
           delay.inputs(SyncNode.getClockInputId) = delay.getClockDomain.readClockWire
+
           if (delay.isUsingReset)
             delay.inputs(SyncNode.getClockResetId) = delay.getClockDomain.readResetWire
+
           delay.inputs(SyncNode.getClockEnableId) = delay.getClockDomain.readClockEnableWire
           Component.pop(delay.component)
         }
@@ -747,7 +737,7 @@ class Backend {
   }
 
 
-  def checkInferedWidth(): Unit = {
+  def checkInferredWidth(): Unit = {
     val errors = mutable.ArrayBuffer[String]()
     Node.walk(walkNodesDefautStack,node => {
       val error = node.checkInferedWidth
@@ -760,7 +750,7 @@ class Backend {
       if(error != null)
         errors += error + s", ${checker.consumer.getWidth} bit assigned by ${checker.provider.getWidth} bit\n  consumer is ${checker.consumer.getScalaLocationString}\n  provider is ${checker.provider.getScalaLocationString}"
     }
-    if (!errors.isEmpty)
+    if (errors.nonEmpty)
       SpinalError(errors)
   }
 
@@ -783,15 +773,20 @@ class Backend {
     Node.walk(walkNodesDefautStack,node => {
       node match{
         case node : BaseType => {
-          val parent = node.component.parent
-          if(parent != null && node.inputs(0) == null && node.defaultValue != null){
-            val c = if(node.dir == in)
-              node.component
-            else
-              node.component.parent
-            Component.push(c)
-            node.assignFrom(node.defaultValue,false)
-            Component.pop(c)
+          if(node.inputs(0) == null && node.defaultValue != null){
+            val c = node.dir match {
+              case `in` => node.component
+              case `out` => if(node.component.parent != null)
+                node.component.parent
+              else
+                null
+              case _ => node.component
+            }
+            if(c != null) {
+              Component.push(c)
+              node.assignFrom(node.defaultValue, false)
+              Component.pop(c)
+            }
           }
         }
         case _ =>
@@ -832,7 +827,7 @@ class Backend {
           errors += s"getWidth call result during elaboration differ from inferred width on ${node.getScalaLocationString}"
         }
       }
-      if (!errors.isEmpty)
+      if (errors.nonEmpty)
         SpinalError(errors)
     }
 
@@ -847,7 +842,7 @@ class Backend {
       }
 
       if (!somethingChange || iterationCounter == nodes.size) {
-        checkAll
+        checkAll()
         return
       }
     }
@@ -859,7 +854,6 @@ class Backend {
     Node.walk(walkNodesDefautStack,node => {
       node match{
         case baseType : BaseType =>{
-
 
         }
         case _ =>
@@ -1000,9 +994,6 @@ class Backend {
     })
   }
 
-
-
-
   def checkCrossClockDomains(): Unit = {
     val errors = mutable.ArrayBuffer[String]()
 
@@ -1026,7 +1017,9 @@ class Backend {
                       val driverClockDomain = syncDriver.getClockDomain
                       if (//syncDriver.getClockDomain.clock != consumerCockDomain.clock &&
                           ! driverClockDomain.isSyncronousWith(consumerCockDomain)) {
-                        errors += s"Synchronous element ${syncNode.getScalaLocationStringShort} is drived by ${syncDriver.getScalaLocationStringShort} but they don't have the same clock domain. Register declaration at\n${syncNode.getScalaTraceString}"
+                        errors += s"Synchronous element ${syncNode.getScalaLocationStringShort} is driven " +
+                          s"by ${syncDriver.getScalaLocationStringShort} but they don't have the same clock domain. " +
+                          s"Register declaration at \n${syncNode.getScalaTraceString}"
                       }
                     }
                     case _ => that.inputs.foreach(input => if (input != null) check(input))
@@ -1047,6 +1040,7 @@ class Backend {
   def checkCombinationalLoops2(): Unit = {
     val targetAlgoId = GlobalData.get.algoId
     GlobalData.get.algoId += 1
+
     val errors = mutable.ArrayBuffer[String]()
     val pendingNodes = mutable.Stack[Node]()
     pendingNodes.pushAll(walkNodesDefautStack)
@@ -1058,9 +1052,9 @@ class Backend {
       val pop = pendingNodes.pop()
       walk(scala.collection.immutable.HashMap[Node, AssignedBits](),Nil,pop,pop.getWidth-1,0)
     }
+
     if (!errors.isEmpty)
       SpinalError(errors)
-
 
     def walk(consumers :  scala.collection.immutable.HashMap[Node, AssignedBits],stack : List[(Node,Int,Int)],
              node: Node,
@@ -1077,7 +1071,7 @@ class Backend {
 
           val wellNameLoop = filtred.reverseIterator.filter{case (n,hi,lo) => n.isInstanceOf[Nameable] && n.asInstanceOf[Nameable].isNamed}.map{case (n,hi,lo)  => n.component.getClass.getSimpleName + "." + n.asInstanceOf[Nameable].getName() + s"($hi:$lo)"}.foldLeft("")(_ + _ + " -> ")
           val multiLineLoop = filtred.reverseIterator.map(n => "      " + n.toString).reduceLeft(_ + "\n" + _)
-          errors += s"  Combinational loop ! ${wellNameLoop}\n${multiLineLoop}"
+          errors += s"  Combinatorial loop ! ${wellNameLoop}\n${multiLineLoop}"
         }else if (!isNodeCompleted(node)) {
           node match {
             case syncNode: SyncNode => {
@@ -1287,7 +1281,6 @@ class Backend {
     })
   }
 
-
   def addNodesIntoComponent(): Unit = {
     Node.walk({
       val stack = walkNodesDefautStack
@@ -1300,17 +1293,15 @@ class Backend {
     })
   }
 
-
   def orderComponentsNodes(): Unit = {
     for (c <- components) {
       c.nodes = c.nodes.sortWith(_.instanceCounter < _.instanceCounter)
     }
   }
 
-
-  def addComponent(c: Component): Unit = {
+  def buildComponentsList(c: Component): Unit = {
     components += c
-    c.kinds.foreach(addComponent(_))
+    c.kinds.foreach(buildComponentsList(_))
   }
 
 }
